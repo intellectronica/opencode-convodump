@@ -11,9 +11,9 @@ Markdown transcript.
   `convos/YYYY-MM-DD-HH-mm-ss-<session-id>.md`
 - Uses a compact frontmatter and conversation-first body format.
 
-## Install from npm
+## Install
 
-Add the package name to `plugin` in your OpenCode config:
+Install via npm by adding the package name to `plugin` in your OpenCode config:
 
 ```json
 {
@@ -24,12 +24,7 @@ Add the package name to `plugin` in your OpenCode config:
 
 OpenCode installs npm plugins automatically with Bun.
 
-## Local file usage (without npm)
-
-Use the plugin file directly:
-
-- Project: `.opencode/plugins/convodump.ts`
-- Global: `~/.config/opencode/plugins/convodump.ts`
+No file copying is required.
 
 ## Release process
 
