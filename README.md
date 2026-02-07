@@ -19,15 +19,6 @@ plugins directory:
 - Project: `.opencode/plugins/convodump.ts`
 - Global: `~/.config/opencode/plugins/convodump.ts`
 
-Then run OpenCode normally.
-
-## Notes
-
-- Exports are atomic (temp file + rename).
-- Duplicate idle triggers are deduplicated.
-- Tool calls are rendered as a single JSON block with top-level
-  `tool`, `input`, and `output`.
-
 ## License
 
 CC0 1.0 Universal. See `LICENSE`.
