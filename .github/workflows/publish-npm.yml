@@ -4,10 +4,16 @@ on:
   release:
     types:
       - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to publish (must match package.json version, e.g. v0.0.1)"
+        required: false
+        type: string
 
 jobs:
   publish:
-    if: github.event.release.prerelease == false
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -19,11 +25,22 @@ jobs:
 
       - name: Ensure tag matches package version
         run: |
+          EVENT_NAME="${{ github.event_name }}"
           VERSION="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
-          TAG="${GITHUB_REF_NAME#v}"
+
+          if [ "$EVENT_NAME" = "release" ]; then
+            RAW_TAG="${GITHUB_REF_NAME}"
+          else
+            RAW_TAG="${{ github.event.inputs.release_tag }}"
+            if [ -z "$RAW_TAG" ]; then
+              RAW_TAG="v$VERSION"
+            fi
+          fi
+
+          TAG="${RAW_TAG#v}"
 
           if [ "$TAG" != "$VERSION" ]; then
-            echo "Release tag must be v$VERSION, got ${GITHUB_REF_NAME}."
+            echo "Release tag must be v$VERSION, got ${RAW_TAG}."
             exit 1
           fi
 

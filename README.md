@@ -41,6 +41,10 @@ Publishing to npm is automated from GitHub Releases using
 3. Create a GitHub Release with tag `v<version>` (for example `v0.0.1`).
 4. The workflow publishes that version to npm.
 
+You can also run the same workflow manually from GitHub Actions using
+`workflow_dispatch` (optionally passing `release_tag`, defaulting to
+`v<package.json version>`).
+
 ### One-time setup required
 
 1. Create an npm automation token for the account that will publish this
