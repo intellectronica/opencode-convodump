@@ -11,11 +11,6 @@ Markdown transcript.
   `convos/YYYY-MM-DD-HH-mm-ss-<session-id>.md`
 - Uses a compact frontmatter and conversation-first body format.
 
-## Repository layout
-
-- Plugin source: `.opencode/plugins/convodump.ts`
-- Generated transcripts: `convos/` (gitignored)
-
 ## How to use
 
 Copy [`convodump.ts`](.opencode/plugins/convodump.ts) into an OpenCode
