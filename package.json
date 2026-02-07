@@ -1,8 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-convodump",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "OpenCode plugin that exports each conversation session to a readable Markdown transcript.",
+  "module": "index.ts",
   "type": "module",
   "license": "CC0-1.0",
   "repository": {
@@ -22,11 +23,12 @@
   ],
   "exports": {
     ".": {
-      "import": "./.opencode/plugins/convodump.ts",
-      "types": "./.opencode/plugins/convodump.ts"
+      "import": "./index.ts",
+      "types": "./index.ts"
     }
   },
   "files": [
+    "index.ts",
     ".opencode/plugins/convodump.ts",
     "README.md",
     "LICENSE"
