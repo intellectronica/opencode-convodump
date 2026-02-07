@@ -3,16 +3,17 @@ import path from "node:path"
 
 const SERVICE_NAME = "opencode-convodump"
 const SCHEMA_VERSION = 1
-const DEBOUNCE_MS = 175
-
 type UnknownRecord = Record<string, unknown>
 
 type SessionState = {
-  timer?: ReturnType<typeof setTimeout>
   queue: Promise<void>
+  scheduled?: boolean
   pendingTrigger?: string
   lastWriteAt?: number
   lastFingerprint?: string
+  cachedSnapshot?: SessionSnapshot
+  prefetching?: Promise<void>
+  lastPrefetchAt?: number
 }
 
 type SessionSnapshot = {
@@ -39,6 +40,20 @@ function asObject(value: unknown): UnknownRecord {
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
+}
+
+function bindMethod<T extends (...args: any[]) => any>(target: unknown, key: string): T | null {
+  if (!target || (typeof target !== "object" && typeof target !== "function")) return null
+  const candidate = (target as Record<string, unknown>)[key]
+  if (typeof candidate !== "function") return null
+  return candidate.bind(target) as T
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  return Promise.race([
+    promise.catch(() => null as T | null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+  ])
 }
 
 function parseDate(value: unknown): Date | null {
@@ -256,24 +271,19 @@ function stableJson(value: unknown): string {
 }
 
 function snapshotFingerprint(snapshot: SessionSnapshot): string {
-  const session = snapshot.session
-  const time = asObject(session.time)
-
-  const minimal = {
-    session_id: session.id ?? null,
-    session_updated_at: time.updated ?? session.updatedAt ?? session.updated_at ?? null,
-    message_count: snapshot.messages.length,
-    message_ids: snapshot.messages.map((message) => {
-      const msg = asObject(message)
-      const info = asObject(msg.info)
-      return msg.id ?? info.id ?? null
-    }),
-    part_counts: snapshot.messages.map((message) => asArray(asObject(message).parts).length),
+  return stableJson({
+    session: snapshot.session,
+    messages: snapshot.messages,
     todos: snapshot.todos,
     diff: snapshot.diff,
-  }
+  })
+}
 
-  return stableJson(minimal)
+function chooseTrigger(existing: string | undefined, incoming: string): string {
+  if (!existing) return incoming
+  if (existing === "session.status:idle") return existing
+  if (incoming === "session.status:idle") return incoming
+  return incoming
 }
 
 function codeFence(content: string): string {
@@ -420,6 +430,19 @@ function renderPart(part: UnknownRecord, index: number): string {
   section.push(`- sessionID: \`${asString(part.sessionID ?? part.sessionId, "n/a")}\``)
   section.push(`- messageID: \`${asString(part.messageID ?? part.messageId, "n/a")}\``)
 
+  if (part.time !== undefined) {
+    if (typeof part.time === "object") {
+      section.push("- time:")
+      section.push(renderAnyBlock(part.time))
+    } else {
+      section.push(`- time: ${asString(part.time, "n/a")}`)
+    }
+  }
+  if (part.metadata !== undefined) {
+    section.push("- metadata:")
+    section.push(renderAnyBlock(part.metadata))
+  }
+
   if (type === "text") {
     section.push(`- synthetic: ${String(Boolean(part.synthetic))}`)
     section.push(`- ignored: ${String(Boolean(part.ignored))}`)
@@ -431,25 +454,29 @@ function renderPart(part: UnknownRecord, index: number): string {
     section.push("Thinking:")
     section.push(renderAnyBlock(part.text ?? part.reasoning ?? part.content ?? "", "text"))
   } else if (type === "tool") {
+    const state = asObject(part.state)
+    const toolStatus = part.status ?? state.status
     section.push(`- tool: \`${asString(part.tool ?? part.name ?? part.toolName, "unknown")}\``)
     section.push(`- callID: \`${asString(part.callID ?? part.callId, "n/a")}\``)
-    section.push(`- status: \`${asString(part.status, "unknown")}\``)
-    if (part.title !== undefined) section.push(`- title: ${asString(part.title, "")}`)
+    section.push(`- status: \`${asString(toolStatus, "unknown")}\``)
+    if (part.title !== undefined || state.title !== undefined) {
+      section.push(`- title: ${asString(part.title ?? state.title, "")}`)
+    }
     section.push("")
     section.push("Tool input:")
-    section.push(renderAnyBlock(part.input ?? part.arguments ?? part.args ?? null))
+    section.push(renderAnyBlock(part.input ?? part.arguments ?? part.args ?? state.input ?? null))
     section.push("")
     section.push("Tool output:")
-    section.push(renderAnyBlock(part.output ?? part.result ?? null))
-    if (part.error !== undefined) {
+    section.push(renderAnyBlock(part.output ?? part.result ?? state.output ?? null))
+    if (part.error !== undefined || state.error !== undefined) {
       section.push("")
       section.push("Tool error:")
-      section.push(renderAnyBlock(part.error))
+      section.push(renderAnyBlock(part.error ?? state.error))
     }
-    if (part.attachments !== undefined) {
+    if (part.attachments !== undefined || state.attachments !== undefined) {
       section.push("")
       section.push("Tool attachments:")
-      section.push(renderAnyBlock(part.attachments))
+      section.push(renderAnyBlock(part.attachments ?? state.attachments))
     }
   } else if (type === "file") {
     section.push(`- filename: \`${asString(part.filename ?? part.name, "unknown")}\``)
@@ -476,7 +503,14 @@ function renderPart(part: UnknownRecord, index: number): string {
   } else if (type === "step-start" || type === "step-finish") {
     if (part.reason !== undefined) section.push(`- reason: ${asString(part.reason, "")}`)
     if (part.cost !== undefined) section.push(`- cost: ${asString(part.cost, "")}`)
-    if (part.tokens !== undefined) section.push(`- tokens: ${asString(part.tokens, "")}`)
+    if (part.tokens !== undefined) {
+      if (typeof part.tokens === "object") {
+        section.push("- tokens:")
+        section.push(renderAnyBlock(part.tokens))
+      } else {
+        section.push(`- tokens: ${asString(part.tokens, "")}`)
+      }
+    }
     if (part.snapshot !== undefined) {
       section.push("")
       section.push("Snapshot:")
@@ -510,6 +544,7 @@ function renderMessage(message: unknown, index: number): string {
   const info = asObject(msg.info)
   const parts = asArray(msg.parts)
   const role = getMessageRole(msg)
+  const messageTime = msg.time ?? info.time
 
   const section: string[] = []
   section.push(`### Message ${index + 1}: ${role}`)
@@ -517,10 +552,13 @@ function renderMessage(message: unknown, index: number): string {
   section.push(`- id: \`${asString(msg.id ?? info.id, "n/a")}\``)
   section.push(`- role: \`${role}\``)
 
-  if (msg.time !== undefined) {
-    section.push(`- time: ${asString(msg.time, "n/a")}`)
-  } else if (info.time !== undefined) {
-    section.push(`- time: ${asString(info.time, "n/a")}`)
+  if (messageTime !== undefined) {
+    if (typeof messageTime === "object") {
+      section.push("- time:")
+      section.push(renderAnyBlock(messageTime))
+    } else {
+      section.push(`- time: ${asString(messageTime, "n/a")}`)
+    }
   }
 
   section.push("")
@@ -636,12 +674,12 @@ async function atomicWrite(filePath: string, content: string): Promise<number> {
 
 async function fetchSessionSnapshot(ctx: UnknownRecord, sessionID: string): Promise<SessionSnapshot> {
   const client = asObject(ctx.client)
-  const sessionClient = asObject(client.session)
+  const sessionClient = client.session
 
-  const get = sessionClient.get as ((arg: unknown) => Promise<{ data: unknown }>) | undefined
-  const messages = sessionClient.messages as ((arg: unknown) => Promise<{ data: unknown }>) | undefined
-  const todo = sessionClient.todo as ((arg: unknown) => Promise<{ data: unknown }>) | undefined
-  const diff = sessionClient.diff as ((arg: unknown) => Promise<{ data: unknown }>) | undefined
+  const get = bindMethod<(arg: unknown) => Promise<{ data: unknown }>>(sessionClient, "get")
+  const messages = bindMethod<(arg: unknown) => Promise<{ data: unknown }>>(sessionClient, "messages")
+  const todo = bindMethod<(arg: unknown) => Promise<{ data: unknown }>>(sessionClient, "todo")
+  const diff = bindMethod<(arg: unknown) => Promise<{ data: unknown }>>(sessionClient, "diff")
 
   if (typeof get !== "function" || typeof messages !== "function") {
     throw new Error("Session API unavailable on plugin context")
@@ -671,12 +709,18 @@ async function fetchSessionSnapshot(ctx: UnknownRecord, sessionID: string): Prom
   }
 }
 
-function resolveOutputRoot(ctx: UnknownRecord): string {
-  const worktree = asString(ctx.worktree, "")
-  if (worktree && worktree !== "/") return worktree
+function resolveOutputRoot(ctx: UnknownRecord, session: UnknownRecord): string {
+  const sessionWorktree = asString(session.worktree, "")
+  if (sessionWorktree && sessionWorktree !== "/") return sessionWorktree
 
-  const directory = asString(ctx.directory, "")
-  if (directory) return directory
+  const ctxWorktree = asString(ctx.worktree, "")
+  if (ctxWorktree && ctxWorktree !== "/") return ctxWorktree
+
+  const sessionDirectory = asString(session.directory, "")
+  if (sessionDirectory) return sessionDirectory
+
+  const ctxDirectory = asString(ctx.directory, "")
+  if (ctxDirectory) return ctxDirectory
 
   return process.cwd()
 }
@@ -693,24 +737,36 @@ function resolveOutputPath(snapshot: SessionSnapshot, outputRoot: string): strin
 
 async function logEvent(ctx: UnknownRecord, level: string, message: string, extra: UnknownRecord = {}): Promise<void> {
   const client = asObject(ctx.client)
-  const app = asObject(client.app)
-  const logger = app.log as ((arg: unknown) => Promise<unknown>) | undefined
-  if (typeof logger !== "function") return
+  const logger = bindMethod<(arg: unknown) => Promise<unknown>>(client.app, "log")
 
-  await logger({
-    body: {
-      service: SERVICE_NAME,
-      level,
-      message,
-      ...extra,
-    },
-  }).catch(() => undefined)
+  if (typeof logger === "function") {
+    await logger({
+      body: {
+        service: SERVICE_NAME,
+        level,
+        message,
+        ...extra,
+      },
+    }).catch(() => undefined)
+    return
+  }
+
+  if (level === "error" || process.env.OPENCODE_CONVODUMP_DEBUG === "1" || process.env.OPENCODE_CONVODUMP_DEBUG === "true") {
+    const serialised = Object.keys(extra).length > 0 ? ` ${stableJson(extra)}` : ""
+    console.error(`[${SERVICE_NAME}] ${level} ${message}${serialised}`)
+  }
 }
 
 export const ConvoDumpPlugin = async (ctx: UnknownRecord) => {
   const state = new Map<string, SessionState>()
   const debug = process.env.OPENCODE_CONVODUMP_DEBUG === "1" || process.env.OPENCODE_CONVODUMP_DEBUG === "true"
-  const outputRoot = resolveOutputRoot(ctx)
+
+  if (debug) {
+    const sessionClient = asObject(ctx.client).session
+    console.error(
+      `[${SERVICE_NAME}] init hasGet=${String(Boolean(bindMethod(sessionClient, "get")))} hasMessages=${String(Boolean(bindMethod(sessionClient, "messages")))} hasTodo=${String(Boolean(bindMethod(sessionClient, "todo")))} hasDiff=${String(Boolean(bindMethod(sessionClient, "diff")))}`,
+    )
+  }
 
   function sessionState(sessionID: string): SessionState {
     const existing = state.get(sessionID)
@@ -723,23 +779,51 @@ export const ConvoDumpPlugin = async (ctx: UnknownRecord) => {
 
   function schedule(sessionID: string, trigger: string): void {
     const entry = sessionState(sessionID)
-    entry.pendingTrigger = trigger
+    entry.pendingTrigger = chooseTrigger(entry.pendingTrigger, trigger)
+    if (debug) {
+      console.error(`[${SERVICE_NAME}] schedule session=${sessionID} trigger=${trigger} pending=${entry.pendingTrigger}`)
+    }
 
-    if (entry.timer) clearTimeout(entry.timer)
+    if (entry.scheduled) return
+    entry.scheduled = true
 
-    entry.timer = setTimeout(() => {
-      const enqueueTrigger = entry.pendingTrigger ?? trigger
-      entry.pendingTrigger = undefined
+    entry.queue = entry.queue
+      .then(async () => {
+        const enqueueTrigger = entry.pendingTrigger ?? trigger
+        entry.pendingTrigger = undefined
 
-      entry.queue = entry.queue
-        .then(async () => {
-          const start = Date.now()
-          await logEvent(ctx, "info", "export.started", { sessionID, trigger: enqueueTrigger })
+        const hold = setInterval(() => undefined, 50)
+        const start = Date.now()
+        try {
+          if (debug) {
+            console.error(`[${SERVICE_NAME}] export begin session=${sessionID} trigger=${enqueueTrigger}`)
+          }
+          void logEvent(ctx, "info", "export.started", { sessionID, trigger: enqueueTrigger })
 
-          const snapshot = await fetchSessionSnapshot(ctx, sessionID)
+          let snapshot = entry.cachedSnapshot
+          if (snapshot) {
+            const refreshed = await withTimeout(fetchSessionSnapshot(ctx, sessionID), 120)
+            if (refreshed) {
+              snapshot = refreshed
+              entry.cachedSnapshot = refreshed
+            } else if (debug) {
+              console.error(`[${SERVICE_NAME}] export refresh timed out, using cached snapshot session=${sessionID}`)
+            }
+          } else {
+            snapshot = await fetchSessionSnapshot(ctx, sessionID)
+            entry.cachedSnapshot = snapshot
+          }
+
+          if (!snapshot) {
+            throw new Error(`No snapshot available for session '${sessionID}'`)
+          }
+
           const fingerprint = snapshotFingerprint(snapshot)
           if (entry.lastFingerprint === fingerprint) {
-            await logEvent(ctx, "info", "export.skipped.unchanged", {
+            if (debug) {
+              console.error(`[${SERVICE_NAME}] export skipped unchanged session=${sessionID}`)
+            }
+            void logEvent(ctx, "info", "export.skipped.unchanged", {
               sessionID,
               trigger: enqueueTrigger,
               duration_ms: Date.now() - start,
@@ -747,13 +831,17 @@ export const ConvoDumpPlugin = async (ctx: UnknownRecord) => {
             return
           }
 
+          const outputRoot = resolveOutputRoot(ctx, snapshot.session)
           const filePath = resolveOutputPath(snapshot, outputRoot)
           const markdown = renderMarkdown(snapshot, enqueueTrigger, ctx)
           const bytes = await atomicWrite(filePath, markdown)
 
           entry.lastWriteAt = Date.now()
           entry.lastFingerprint = fingerprint
-          await logEvent(ctx, "info", "export.completed", {
+          if (debug) {
+            console.error(`[${SERVICE_NAME}] export wrote session=${sessionID} file=${filePath} bytes=${bytes}`)
+          }
+          void logEvent(ctx, "info", "export.completed", {
             sessionID,
             trigger: enqueueTrigger,
             filePath,
@@ -761,30 +849,80 @@ export const ConvoDumpPlugin = async (ctx: UnknownRecord) => {
             duration_ms: Date.now() - start,
             last_write_at: entry.lastWriteAt,
           })
+        } finally {
+          clearInterval(hold)
+          entry.scheduled = false
+          if (entry.pendingTrigger) {
+            schedule(sessionID, entry.pendingTrigger)
+          }
+        }
+      })
+      .catch(async (error) => {
+        entry.scheduled = false
+        const errorMessage = asString((error as Error)?.stack ?? (error as Error)?.message ?? error)
+        if (debug) {
+          console.error(`[${SERVICE_NAME}] export failed session=${sessionID} error=${errorMessage}`)
+        }
+        void logEvent(ctx, "error", "export.failed", {
+          sessionID,
+          trigger: entry.pendingTrigger ?? trigger,
+          error: errorMessage,
         })
-        .catch(async (error) => {
-          await logEvent(ctx, "error", "export.failed", {
-            sessionID,
-            trigger: enqueueTrigger,
-            error: asString((error as Error)?.stack ?? (error as Error)?.message ?? error),
-          })
-        })
-    }, DEBOUNCE_MS)
 
-    if (typeof (entry.timer as { unref?: () => void }).unref === "function") {
-      ;(entry.timer as { unref: () => void }).unref()
-    }
+        if (entry.pendingTrigger) {
+          schedule(sessionID, entry.pendingTrigger)
+        }
+      })
+  }
+
+  function prefetchSnapshot(sessionID: string, reason: string): void {
+    const entry = sessionState(sessionID)
+    const now = Date.now()
+
+    if (entry.prefetching) return
+    if (entry.lastPrefetchAt && now - entry.lastPrefetchAt < 300) return
+
+    entry.lastPrefetchAt = now
+    entry.prefetching = fetchSessionSnapshot(ctx, sessionID)
+      .then((snapshot) => {
+        entry.cachedSnapshot = snapshot
+        if (debug) {
+          console.error(`[${SERVICE_NAME}] prefetched session=${sessionID} reason=${reason}`)
+        }
+      })
+      .catch((error) => {
+        if (debug) {
+          console.error(`[${SERVICE_NAME}] prefetch failed session=${sessionID} reason=${reason} error=${asString((error as Error)?.message ?? error)}`)
+        }
+      })
+      .finally(() => {
+        entry.prefetching = undefined
+      })
   }
 
   return {
-    event: async ({ event }: { event: UnknownRecord }) => {
+    event: async (payload: unknown) => {
       try {
+        const payloadObject = asObject(payload)
+        const nestedEvent = asObject(payloadObject.event)
+        const event = Object.keys(nestedEvent).length > 0 ? nestedEvent : payloadObject
+
         const type = asString(event.type)
         const sessionID = resolveSessionIdFromEvent(event)
+        if (debug) {
+          console.error(`[${SERVICE_NAME}] event type=${type} sessionID=${sessionID ?? ""}`)
+        }
         if (!sessionID) return
 
         if (type === "session.status") {
           const status = asObject(asObject(event.properties).status)
+          if (debug) {
+            console.error(`[${SERVICE_NAME}] session.status state=${asString(status.type, "unknown")}`)
+          }
+          const statusType = asString(status.type)
+          if (statusType === "busy" || statusType === "retry") {
+            prefetchSnapshot(sessionID, `session.status:${statusType}`)
+          }
           if (status.type === "idle") {
             schedule(sessionID, "session.status:idle")
           }
@@ -793,6 +931,11 @@ export const ConvoDumpPlugin = async (ctx: UnknownRecord) => {
 
         if (type === "session.idle") {
           schedule(sessionID, "session.idle")
+          return
+        }
+
+        if (type === "session.diff" || type === "todo.updated") {
+          prefetchSnapshot(sessionID, type)
           return
         }
 
