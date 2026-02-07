@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-convodump",
+  "version": "0.0.1",
+  "description": "OpenCode plugin that exports each conversation session to a readable Markdown transcript.",
+  "type": "module",
+  "license": "CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/intellectronica/opencode-convodump.git"
+  },
+  "bugs": {
+    "url": "https://github.com/intellectronica/opencode-convodump/issues"
+  },
+  "homepage": "https://github.com/intellectronica/opencode-convodump#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "plugin",
+    "transcript",
+    "markdown"
+  ],
+  "exports": {
+    ".": {
+      "import": "./.opencode/plugins/convodump.ts",
+      "types": "./.opencode/plugins/convodump.ts"
+    }
+  },
+  "files": [
+    ".opencode/plugins/convodump.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}
