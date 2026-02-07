@@ -18,27 +18,13 @@ Markdown transcript.
 
 ## How to use
 
-Install the plugin either per project or globally.
+Copy [`convodump.ts`](.opencode/plugins/convodump.ts) into an OpenCode
+plugins directory:
 
-### Per-project install
+- Project: `.opencode/plugins/convodump.ts`
+- Global: `~/.config/opencode/plugins/convodump.ts`
 
-1. In your target repo, create `.opencode/plugins/`.
-2. Copy this file to `.opencode/plugins/convodump.ts`.
-3. Run OpenCode in that repo (`opencode run ...`, `opencode`, or
-   `opencode serve`).
-
-This enables transcript export only for that project.
-
-### Global install
-
-1. Create `~/.config/opencode/plugins/` if needed.
-2. Copy this file to `~/.config/opencode/plugins/convodump.ts`.
-3. Run OpenCode in any project.
-
-This enables transcript export for all projects.
-
-Note: avoid installing the same plugin both globally and per-project,
-otherwise both copies will load.
+Then run OpenCode normally.
 
 ## Notes
 
