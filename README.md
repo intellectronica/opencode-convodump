@@ -21,29 +21,3 @@ Install via npm by adding the package name to `plugin` in your OpenCode config:
   "plugin": ["opencode-convodump"]
 }
 ```
-
-OpenCode installs npm plugins automatically with Bun.
-
-No file copying is required.
-
-## Release process
-
-Publishing to npm is automated from GitHub Releases using
-`.github/workflows/publish-npm.yml`.
-
-1. Bump `version` in `package.json`.
-2. Commit and push the version change.
-3. Create a GitHub Release with tag `v<version>` (for example `v0.0.1`).
-4. The workflow publishes that version to npm.
-
-You can also run the same workflow manually from GitHub Actions using
-`workflow_dispatch` (optionally passing `release_tag`, defaulting to
-`v<package.json version>`).
-
-### One-time setup required
-
-1. Create an npm automation token for the account that will publish this
-   package.
-2. Add the token as a GitHub Actions secret named `NPM_TOKEN`.
-3. Ensure the npm account tied to `NPM_TOKEN` has publish rights to
-   `opencode-convodump`.
