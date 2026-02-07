@@ -2,7 +2,6 @@ import { mkdir, rename, unlink, writeFile } from "node:fs/promises"
 import path from "node:path"
 
 const SERVICE_NAME = "opencode-convodump"
-const SCHEMA_VERSION = 1
 type UnknownRecord = Record<string, unknown>
 
 type SessionState = {
@@ -302,11 +301,6 @@ function renderCodeBlock(content: string, language = ""): string {
   return `${fence}${suffix}\n${clean}\n${fence}`
 }
 
-function renderAnyBlock(value: unknown, language = "json"): string {
-  if (typeof value === "string") return renderCodeBlock(value, language)
-  return renderCodeBlock(stableJson(value), language)
-}
-
 function resolveSessionIdFromEvent(event: UnknownRecord): string | null {
   const props = asObject(event.properties)
   const session = asObject(props.session)
@@ -331,251 +325,219 @@ function getMessageRole(message: unknown): string {
   return asString(role, "unknown")
 }
 
-function buildStats(messages: unknown[]): UnknownRecord {
-  const partTypeCounts: Record<string, number> = {}
-  let partCount = 0
-  let userCount = 0
-  let assistantCount = 0
+function buildFrontmatter(session: UnknownRecord): UnknownRecord {
+  const time = asObject(session.time)
 
-  for (const message of messages) {
-    const role = getMessageRole(message)
-    if (role === "user") userCount += 1
-    if (role === "assistant") assistantCount += 1
+  return {
+    session_id: session.id ?? null,
+    title: session.title ?? null,
+    created_at: toISO(time.created ?? session.createdAt ?? session.created_at),
+    updated_at: toISO(time.updated ?? session.updatedAt ?? session.updated_at),
+  }
+}
 
-    const parts = asArray(asObject(message).parts)
-    partCount += parts.length
+function truncateText(value: string, maxChars = 5000): string {
+  const normalised = normaliseNewlines(value)
+  if (normalised.length <= maxChars) return normalised
 
-    for (const part of parts) {
-      const type = asString(asObject(part).type, "unknown")
-      partTypeCounts[type] = (partTypeCounts[type] ?? 0) + 1
+  const omitted = normalised.length - maxChars
+  return `${normalised.slice(0, maxChars)}\n\n... [truncated ${omitted} chars]`
+}
+
+function renderQuoteBlock(value: string, maxChars = 7000): string {
+  const text = truncateText(value, maxChars)
+  if (text.trim() === "") return ">"
+
+  return text
+    .split("\n")
+    .map((line) => (line === "" ? ">" : `> ${line}`))
+    .join("\n")
+}
+
+function renderPlainText(value: string, maxChars = 7000): string {
+  return truncateText(value, maxChars).trim()
+}
+
+function truncateInlineText(value: string, maxChars: number): string {
+  const flattened = normaliseNewlines(value).replace(/\s+/g, " ").trim()
+  if (flattened.length <= maxChars) return flattened
+  if (maxChars <= 3) return "..."
+  return `${flattened.slice(0, maxChars - 3)}...`
+}
+
+function compactToolJsonValue(value: unknown, baseLimit: number, depth = 0): unknown {
+  if (value === null || value === undefined) return null
+
+  if (typeof value === "string") {
+    const maxChars = Math.max(16, baseLimit - depth * 4)
+    return truncateInlineText(value, maxChars)
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") return value
+
+  if (Array.isArray(value)) {
+    const limit = 16
+    const items = value.slice(0, limit).map((item) => compactToolJsonValue(item, baseLimit, depth + 1))
+    if (value.length > limit) {
+      items.push(`... (${value.length - limit} more items)`)
+    }
+    return items
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(asObject(value))
+    const limit = 24
+    const result: UnknownRecord = {}
+
+    for (const [key, child] of entries.slice(0, limit)) {
+      result[key] = compactToolJsonValue(child, baseLimit, depth + 1)
+    }
+
+    if (entries.length > limit) {
+      result._truncated = `${entries.length - limit} additional keys`
+    }
+
+    return result
+  }
+
+  return asString(value)
+}
+
+function formatToolCallJson(value: UnknownRecord): string {
+  for (const limit of [56, 48, 40, 32, 24]) {
+    const compact = compactToolJsonValue(value, limit)
+    const rendered = JSON.stringify(compact, null, 2)
+    if (rendered.split("\n").every((line) => line.length <= 80)) {
+      return rendered
     }
   }
 
-  return {
-    message_count: messages.length,
-    user_count: userCount,
-    assistant_count: assistantCount,
-    part_count: partCount,
-    part_type_counts: partTypeCounts,
-  }
+  return JSON.stringify(compactToolJsonValue(value, 20), null, 2)
 }
 
-function buildFrontmatterSession(session: UnknownRecord, ctx: UnknownRecord): UnknownRecord {
-  const time = asObject(session.time)
-  const share = asObject(session.share)
-
-  const known: UnknownRecord = {
-    id: session.id ?? null,
-    title: session.title ?? null,
-    project_id: session.projectID ?? session.projectId ?? null,
-    directory: session.directory ?? ctx.directory ?? null,
-    worktree: session.worktree ?? ctx.worktree ?? null,
-    parent_id: session.parentID ?? session.parentId ?? null,
-    version: session.version ?? null,
-    created_at: toISO(time.created ?? session.createdAt ?? session.created_at),
-    updated_at: toISO(time.updated ?? session.updatedAt ?? session.updated_at),
-    share_url: share.url ?? session.shareURL ?? session.share_url ?? null,
-    permissions: session.permissions ?? null,
-  }
-
-  const consumedKeys = new Set([
-    "id",
-    "title",
-    "projectID",
-    "projectId",
-    "directory",
-    "worktree",
-    "parentID",
-    "parentId",
-    "version",
-    "time",
-    "createdAt",
-    "created_at",
-    "updatedAt",
-    "updated_at",
-    "share",
-    "shareURL",
-    "share_url",
-    "permissions",
-  ])
-
-  const extras: UnknownRecord = {}
-  for (const [key, value] of Object.entries(session)) {
-    if (consumedKeys.has(key)) continue
-    extras[key] = value
-  }
-
-  if (Object.keys(extras).length > 0) {
-    known.additional = extras
-  }
-
-  known.raw_json = stableJson(session)
-  return known
+function renderCompactJson(value: unknown, maxChars = 3200): string {
+  const raw = typeof value === "string" ? value : stableJson(value)
+  const language = typeof value === "string" ? "text" : "json"
+  return renderCodeBlock(truncateText(raw, maxChars), language)
 }
 
-function formatSessionLabel(session: UnknownRecord): string {
-  const title = asString(session.title, "").trim()
-  if (title !== "") return title
-  return asString(session.id, "Untitled Session")
+function hasContent(value: unknown): boolean {
+  if (value === null || value === undefined) return false
+  if (typeof value === "string") return value.trim() !== ""
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === "object") return Object.keys(asObject(value)).length > 0
+  return true
 }
 
-function renderPart(part: UnknownRecord, index: number): string {
+function formatRole(role: string): string {
+  if (!role) return "Unknown"
+  if (role.toLowerCase() === "assistant") return "Agent"
+  return `${role.charAt(0).toUpperCase()}${role.slice(1)}`
+}
+
+function renderPart(part: UnknownRecord): string {
   const type = asString(part.type, "unknown")
   const section: string[] = []
 
-  section.push(`#### Part ${index + 1}: ${type}`)
-  section.push("")
-  section.push(`- id: \`${asString(part.id, "n/a")}\``)
-  section.push(`- type: \`${type}\``)
-  section.push(`- sessionID: \`${asString(part.sessionID ?? part.sessionId, "n/a")}\``)
-  section.push(`- messageID: \`${asString(part.messageID ?? part.messageId, "n/a")}\``)
-
-  if (part.time !== undefined) {
-    if (typeof part.time === "object") {
-      section.push("- time:")
-      section.push(renderAnyBlock(part.time))
-    } else {
-      section.push(`- time: ${asString(part.time, "n/a")}`)
-    }
-  }
-  if (part.metadata !== undefined) {
-    section.push("- metadata:")
-    section.push(renderAnyBlock(part.metadata))
-  }
-
   if (type === "text") {
-    section.push(`- synthetic: ${String(Boolean(part.synthetic))}`)
-    section.push(`- ignored: ${String(Boolean(part.ignored))}`)
-    section.push("")
-    section.push("Text:")
-    section.push(renderAnyBlock(part.text ?? part.content ?? "", "text"))
+    const text = renderPlainText(asString(part.text ?? part.content, ""))
+    if (text) section.push(text)
+
+    const flags: string[] = []
+    if (part.synthetic === true) flags.push("synthetic")
+    if (part.ignored === true) flags.push("ignored")
+    if (flags.length > 0) {
+      section.push("")
+      section.push(`_(${flags.join(", ")})_`)
+    }
   } else if (type === "reasoning") {
-    section.push("")
-    section.push("Thinking:")
-    section.push(renderAnyBlock(part.text ?? part.reasoning ?? part.content ?? "", "text"))
+    const thinking = asString(part.text ?? part.reasoning ?? part.content, "")
+    if (thinking.trim() !== "") {
+      section.push(renderQuoteBlock(thinking, 12000))
+    }
   } else if (type === "tool") {
     const state = asObject(part.state)
-    const toolStatus = part.status ?? state.status
-    section.push(`- tool: \`${asString(part.tool ?? part.name ?? part.toolName, "unknown")}\``)
-    section.push(`- callID: \`${asString(part.callID ?? part.callId, "n/a")}\``)
-    section.push(`- status: \`${asString(toolStatus, "unknown")}\``)
-    if (part.title !== undefined || state.title !== undefined) {
-      section.push(`- title: ${asString(part.title ?? state.title, "")}`)
+    const toolInput = part.input ?? part.arguments ?? part.args ?? state.input ?? null
+    const toolResult = part.output ?? part.result ?? state.output
+    const toolError = part.error ?? state.error
+    const toolAttachments = part.attachments ?? state.attachments
+
+    const outputPayload: UnknownRecord = {}
+    if (hasContent(toolResult)) outputPayload.result = toolResult
+    if (hasContent(toolError)) outputPayload.error = toolError
+    if (hasContent(toolAttachments)) outputPayload.attachments = toolAttachments
+
+    const toolCall: UnknownRecord = {
+      tool: asString(part.tool ?? part.name ?? part.toolName, "unknown"),
+      input: toolInput,
+      output: Object.keys(outputPayload).length > 0 ? outputPayload : null,
     }
-    section.push("")
-    section.push("Tool input:")
-    section.push(renderAnyBlock(part.input ?? part.arguments ?? part.args ?? state.input ?? null))
-    section.push("")
-    section.push("Tool output:")
-    section.push(renderAnyBlock(part.output ?? part.result ?? state.output ?? null))
-    if (part.error !== undefined || state.error !== undefined) {
-      section.push("")
-      section.push("Tool error:")
-      section.push(renderAnyBlock(part.error ?? state.error))
-    }
-    if (part.attachments !== undefined || state.attachments !== undefined) {
-      section.push("")
-      section.push("Tool attachments:")
-      section.push(renderAnyBlock(part.attachments ?? state.attachments))
-    }
+
+    section.push(renderCodeBlock(formatToolCallJson(toolCall), "json"))
   } else if (type === "file") {
-    section.push(`- filename: \`${asString(part.filename ?? part.name, "unknown")}\``)
-    section.push(`- mime: \`${asString(part.mime ?? part.mimeType, "unknown")}\``)
-    section.push(`- url: ${asString(part.url, "n/a")}`)
+    section.push(`File \`${asString(part.filename ?? part.name, "unknown")}\` (${asString(part.mime ?? part.mimeType, "unknown")})`)
+    if (part.url) section.push(`- URL: ${asString(part.url)}`)
     if (part.source !== undefined) {
-      section.push("- source:")
-      section.push(renderAnyBlock(part.source))
+      section.push("- Source:")
+      section.push(renderCompactJson(part.source, 1800))
     }
   } else if (type === "subtask") {
-    section.push(`- agent: \`${asString(part.agent, "unknown")}\``)
-    section.push(`- model: \`${asString(part.model, "unknown")}\``)
-    section.push(`- command: \`${asString(part.command, "")}\``)
+    section.push(`Subtask \`${asString(part.agent, "unknown")}\` (${asString(part.model, "unknown")})`)
+
+    const command = asString(part.command, "")
+    if (command) section.push(`- Command: \`${command}\``)
+
     if (part.description !== undefined) {
       section.push("")
       section.push("Description:")
-      section.push(renderAnyBlock(part.description, "text"))
+      section.push(renderQuoteBlock(asString(part.description, ""), 6000))
     }
+
     if (part.prompt !== undefined) {
       section.push("")
       section.push("Prompt:")
-      section.push(renderAnyBlock(part.prompt, "text"))
+      section.push(renderQuoteBlock(asString(part.prompt, ""), 6000))
     }
   } else if (type === "step-start" || type === "step-finish") {
-    if (part.reason !== undefined) section.push(`- reason: ${asString(part.reason, "")}`)
-    if (part.cost !== undefined) section.push(`- cost: ${asString(part.cost, "")}`)
-    if (part.tokens !== undefined) {
-      if (typeof part.tokens === "object") {
-        section.push("- tokens:")
-        section.push(renderAnyBlock(part.tokens))
-      } else {
-        section.push(`- tokens: ${asString(part.tokens, "")}`)
-      }
-    }
-    if (part.snapshot !== undefined) {
-      section.push("")
-      section.push("Snapshot:")
-      section.push(renderAnyBlock(part.snapshot))
-    }
-  } else if (
-    type === "snapshot" ||
-    type === "patch" ||
-    type === "agent" ||
-    type === "retry" ||
-    type === "compaction"
-  ) {
-    section.push("")
-    section.push("Type payload:")
-    section.push(renderAnyBlock(part))
+    return ""
   } else {
+    section.push(`${type}:`)
     section.push("")
-    section.push("Unknown part type payload:")
-    section.push(renderAnyBlock(part))
+    section.push("Details:")
+    section.push(renderCompactJson(part, 2200))
   }
-
-  section.push("")
-  section.push("Raw part JSON:")
-  section.push(renderAnyBlock(part))
 
   return section.join("\n")
 }
 
 function renderMessage(message: unknown, index: number): string {
   const msg = asObject(message)
-  const info = asObject(msg.info)
   const parts = asArray(msg.parts)
   const role = getMessageRole(msg)
-  const messageTime = msg.time ?? info.time
+  void index
 
   const section: string[] = []
-  section.push(`### Message ${index + 1}: ${role}`)
+  section.push(`### ${formatRole(role)}`)
   section.push("")
-  section.push(`- id: \`${asString(msg.id ?? info.id, "n/a")}\``)
-  section.push(`- role: \`${role}\``)
-
-  if (messageTime !== undefined) {
-    if (typeof messageTime === "object") {
-      section.push("- time:")
-      section.push(renderAnyBlock(messageTime))
-    } else {
-      section.push(`- time: ${asString(messageTime, "n/a")}`)
-    }
-  }
-
-  section.push("")
-  section.push("Message info JSON:")
-  section.push(renderAnyBlock(info))
 
   if (parts.length === 0) {
-    section.push("")
-    section.push("No parts in this message.")
+    section.push("_No content._")
     return section.join("\n")
   }
 
-  section.push("")
-  section.push(`Parts (${parts.length}):`)
+  let hasRenderedPart = false
+
   for (let i = 0; i < parts.length; i += 1) {
-    section.push("")
-    section.push(renderPart(asObject(parts[i]), i))
+    const renderedPart = renderPart(asObject(parts[i]))
+    if (!renderedPart) continue
+
+    if (hasRenderedPart) section.push("")
+    section.push(renderedPart)
+    hasRenderedPart = true
+  }
+
+  if (!hasRenderedPart) {
+    section.push("_No content._")
   }
 
   return section.join("\n")
@@ -584,71 +546,31 @@ function renderMessage(message: unknown, index: number): string {
 function renderMarkdown(snapshot: SessionSnapshot, trigger: string, ctx: UnknownRecord): string {
   const session = snapshot.session
   const messages = snapshot.messages
-  const todos = snapshot.todos
-  const diff = snapshot.diff
 
-  const frontmatter: UnknownRecord = {
-    schema_version: SCHEMA_VERSION,
-    exporter: {
-      name: SERVICE_NAME,
-      generated_at: new Date().toISOString(),
-      trigger,
-    },
-    session: buildFrontmatterSession(session, ctx),
-    stats: buildStats(messages),
-  }
+  void trigger
+  void ctx
+
+  const frontmatter = buildFrontmatter(session)
 
   const content: string[] = []
   content.push("---")
   content.push(toYaml(frontmatter))
   content.push("---")
-  content.push("")
-  content.push(`# ${formatSessionLabel(session)}`)
-  content.push("")
-  content.push("## Session")
-  content.push("")
-  content.push(`- id: \`${asString(session.id, "n/a")}\``)
-  content.push(`- title: ${asString(session.title, "(none)")}`)
-  content.push(`- project_id: \`${asString(session.projectID ?? session.projectId, "n/a")}\``)
-  content.push(`- directory: \`${asString(session.directory ?? ctx.directory, "n/a")}\``)
-  content.push(`- worktree: \`${asString(session.worktree ?? ctx.worktree, "n/a")}\``)
-  content.push(`- parent_id: \`${asString(session.parentID ?? session.parentId, "n/a")}\``)
-  content.push(`- version: \`${asString(session.version, "n/a")}\``)
-  content.push(`- created_at: ${asString(toISO(asObject(session.time).created ?? session.createdAt), "n/a")}`)
-  content.push(`- updated_at: ${asString(toISO(asObject(session.time).updated ?? session.updatedAt), "n/a")}`)
-  content.push(`- share_url: ${asString(asObject(session.share).url ?? session.shareURL, "n/a")}`)
-
-  if (todos !== null && todos !== undefined) {
-    content.push("")
-    content.push("## Current Todos")
-    content.push("")
-    content.push(renderAnyBlock(todos))
-  }
-
-  if (diff !== null && diff !== undefined) {
-    content.push("")
-    content.push("## Session Diff")
-    content.push("")
-    content.push(renderAnyBlock(diff))
-  }
-
-  content.push("")
-  content.push("## Message Timeline")
 
   if (messages.length === 0) {
     content.push("")
-    content.push("No messages found.")
+    content.push("_No messages yet._")
   } else {
     for (let i = 0; i < messages.length; i += 1) {
+      if (i > 0) {
+        content.push("")
+        content.push("---")
+      }
+
       content.push("")
       content.push(renderMessage(messages[i], i))
     }
   }
-
-  content.push("")
-  content.push("## Raw Payload Appendix")
-  content.push("")
-  content.push(renderAnyBlock({ session, messages, todos, diff }))
 
   return normaliseNewlines(content.join("\n"))
 }
