@@ -18,7 +18,3 @@ plugins directory:
 
 - Project: `.opencode/plugins/convodump.ts`
 - Global: `~/.config/opencode/plugins/convodump.ts`
-
-## License
-
-CC0 1.0 Universal. See `LICENSE`.
