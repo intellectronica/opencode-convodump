@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-convodump",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "OpenCode plugin that exports each conversation session to a readable Markdown transcript.",
   "type": "module",
   "license": "CC0-1.0",
