@@ -14,7 +14,6 @@ Markdown transcript.
 ## Repository layout
 
 - Plugin source: `.opencode/plugins/convodump.ts`
-- OpenCode plugin dependency: `.opencode/package.json`
 - Generated transcripts: `convos/` (gitignored)
 
 ## How to use
@@ -25,17 +24,7 @@ Install the plugin either per project or globally.
 
 1. In your target repo, create `.opencode/plugins/`.
 2. Copy this file to `.opencode/plugins/convodump.ts`.
-3. Ensure `.opencode/package.json` includes:
-
-```json
-{
-  "dependencies": {
-    "@opencode-ai/plugin": "1.1.53"
-  }
-}
-```
-
-4. Run OpenCode in that repo (`opencode run ...`, `opencode`, or
+3. Run OpenCode in that repo (`opencode run ...`, `opencode`, or
    `opencode serve`).
 
 This enables transcript export only for that project.
@@ -44,17 +33,7 @@ This enables transcript export only for that project.
 
 1. Create `~/.config/opencode/plugins/` if needed.
 2. Copy this file to `~/.config/opencode/plugins/convodump.ts`.
-3. Ensure `~/.config/opencode/package.json` includes:
-
-```json
-{
-  "dependencies": {
-    "@opencode-ai/plugin": "1.1.53"
-  }
-}
-```
-
-4. Run OpenCode in any project.
+3. Run OpenCode in any project.
 
 This enables transcript export for all projects.
 
