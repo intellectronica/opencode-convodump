@@ -595,26 +595,25 @@ async function atomicWrite(filePath: string, content: string): Promise<number> {
 }
 
 async function fetchSessionSnapshot(ctx: UnknownRecord, sessionID: string): Promise<SessionSnapshot> {
-  const client = asObject(ctx.client)
-  const sessionClient = client.session
-
-  const get = bindMethod<(arg: unknown) => Promise<{ data: unknown }>>(sessionClient, "get")
-  const messages = bindMethod<(arg: unknown) => Promise<{ data: unknown }>>(sessionClient, "messages")
-  const todo = bindMethod<(arg: unknown) => Promise<{ data: unknown }>>(sessionClient, "todo")
-  const diff = bindMethod<(arg: unknown) => Promise<{ data: unknown }>>(sessionClient, "diff")
-
-  if (typeof get !== "function" || typeof messages !== "function") {
-    throw new Error("Session API unavailable on plugin context")
+  // Cast directly to the typed client — class instances do not expose methods as
+  // plain enumerable properties, so bindMethod() would return null for them.
+  const typedClient = ctx.client as {
+    session: {
+      get: (arg: { path: { id: string } }) => Promise<{ data: unknown }>
+      messages: (arg: { path: { id: string } }) => Promise<{ data: unknown }>
+      todo?: (arg: { path: { id: string } }) => Promise<{ data: unknown }>
+      diff?: (arg: { path: { id: string } }) => Promise<{ data: unknown }>
+    }
   }
 
   const [sessionResult, messagesResult, todoResult, diffResult] = await Promise.all([
-    get({ path: { id: sessionID } }),
-    messages({ path: { id: sessionID } }),
-    typeof todo === "function"
-      ? todo({ path: { id: sessionID } }).catch(() => ({ data: null }))
+    typedClient.session.get({ path: { id: sessionID } }),
+    typedClient.session.messages({ path: { id: sessionID } }),
+    typedClient.session.todo
+      ? typedClient.session.todo({ path: { id: sessionID } }).catch(() => ({ data: null }))
       : Promise.resolve({ data: null }),
-    typeof diff === "function"
-      ? diff({ path: { id: sessionID } }).catch(() => ({ data: null }))
+    typedClient.session.diff
+      ? typedClient.session.diff({ path: { id: sessionID } }).catch(() => ({ data: null }))
       : Promise.resolve({ data: null }),
   ])
 
@@ -658,19 +657,21 @@ function resolveOutputPath(snapshot: SessionSnapshot, outputRoot: string): strin
 }
 
 async function logEvent(ctx: UnknownRecord, level: string, message: string, extra: UnknownRecord = {}): Promise<void> {
-  const client = asObject(ctx.client)
-  const logger = bindMethod<(arg: unknown) => Promise<unknown>>(client.app, "log")
-
-  if (typeof logger === "function") {
-    await logger({
+  // Class instances do not expose methods as plain enumerable properties, so
+  // bindMethod() would return null. Cast directly and call with a try/catch fallback.
+  try {
+    const appClient = ctx.client as { app: { log: (arg: unknown) => Promise<unknown> } }
+    await appClient.app.log({
       body: {
         service: SERVICE_NAME,
         level,
         message,
         ...extra,
       },
-    }).catch(() => undefined)
+    })
     return
+  } catch {
+    // fall through to console fallback
   }
 
   if (level === "error" || process.env.OPENCODE_CONVODUMP_DEBUG === "1" || process.env.OPENCODE_CONVODUMP_DEBUG === "true") {
@@ -684,9 +685,10 @@ export const ConvoDumpPlugin = async (ctx: UnknownRecord) => {
   const debug = process.env.OPENCODE_CONVODUMP_DEBUG === "1" || process.env.OPENCODE_CONVODUMP_DEBUG === "true"
 
   if (debug) {
-    const sessionClient = asObject(ctx.client).session
+    const typedClientDebug = ctx.client as { session?: { get?: unknown; messages?: unknown; todo?: unknown; diff?: unknown } }
+    const s = typedClientDebug.session ?? {}
     console.error(
-      `[${SERVICE_NAME}] init hasGet=${String(Boolean(bindMethod(sessionClient, "get")))} hasMessages=${String(Boolean(bindMethod(sessionClient, "messages")))} hasTodo=${String(Boolean(bindMethod(sessionClient, "todo")))} hasDiff=${String(Boolean(bindMethod(sessionClient, "diff")))}`,
+      `[${SERVICE_NAME}] init hasGet=${String(typeof s.get === "function")} hasMessages=${String(typeof s.messages === "function")} hasTodo=${String(typeof s.todo === "function")} hasDiff=${String(typeof s.diff === "function")}`,
     )
   }
 
